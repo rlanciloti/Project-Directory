@@ -6,13 +6,81 @@ import random
 import sys
 import string
 
+help_menu = """
+Welcome to DragonBall!
 
-mode = ''
-num_files = 0
-in_files = []
+Named after the hit TV show 'Dragon Ball', this script can split any file into multiple other files.
+Each individual piece will be encrypted with a psudeo-random bit stream before it's written out to
+the out files.
+
+This script can also recombine and decrypt the files previously encrypted with it...so long as you
+have the keys D:
+
+-h: Prints this message, will exit the program after
+-d: Specifies that the script should run in decryption mode
+-e: Specifies that the script should run in encryption mode
+-fc: If in decryption mode, this is the number of files
+needed to be read in to decrypt the file. In encryption mode, it specifies the number of output
+files and in decryption mode, it specifies the number of input files.
+-o: Used to specify the name of the output file.  Optional. Only used in decryption mode.
+-s: Used to specify the random generator seed. Optional.
+-r: Used for creating an output report. Used only in encryption mode. Optional
+-f: Used for specifying the input files. When in decryption mode, these are the encrypted files,
+when in encryption mode, this is the file to be encrypted
+"""
 
 
-def invert(val: bytes) -> bytearray:
+class ArgParser:
+	"""
+	This class will be used for setting up the environment based on the commandline arguments
+	"""
+
+	def __init__(self, arguments: list) -> None:
+		"""
+		Creates the ArgParser object
+		"""
+		if '-h' in arguments:
+			print(help_menu)
+			sys.exit(0)
+		if '-d' in arguments:
+			self.mode = '-d'
+		elif '-e' in arguments:
+			self.mode = '-e'
+		elif '-d' not in arguments and '-e' not in arguments:
+			print("Error: mode not specified")
+			sys.exit(1)
+
+		self.seed = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(32))
+		self.outfile = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(7)) + '.out'
+		self.create_report = False
+		self.files = []
+		self.num_files = 0
+
+		for index in range(len(arguments)):
+			if self.mode == '-d':
+				if arguments[index] == '-o':
+					self.outfile = arguments[index + 1]
+				if arguments[index] == '-f':
+					self.files = arguments[index + 1: index + 1 + self.num_files]
+
+			if self.mode == '-e':
+				if arguments[index] == '-r':
+					self.create_report = True
+					self.report_name = arguments[index + 1]
+				if arguments[index] == '-f':
+					self.files = [arguments[index + 1]]
+
+			if arguments[index] == '-s':
+					self.seed = arguments[index + 1]
+			if arguments[index] == '-fc':
+				self.num_files = int(arguments[index + 1])
+
+		if not self.files:
+			print("Error: No input files specified")
+			sys.exit(2)
+
+
+def xor(val1: bytes, val2: bytes) -> bytearray:
 	"""
 	This function will invert a byte
 
@@ -22,7 +90,7 @@ def invert(val: bytes) -> bytearray:
 	:rtype: bytearray
 	"""
 	res = []
-	for b1, b2 in zip(val, [0xFF]):
+	for b1, b2 in zip(val1, val2):
 		res.append(b1 ^ b2)
 	return res[0]
 
@@ -37,12 +105,12 @@ def generate_random_files(f_count: int) -> list:
 	:rtype: list
 	"""
 	files = []
-	name_length = 5
+	name_length = 8
 	for file in range(f_count):
 		file_name = ''
 		for char in range(name_length):
 			file_name += random.choice(string.ascii_letters)
-		files.append(file_name + str(file) + '.encpt')
+		files.append(file_name)
 
 	return files
 
@@ -55,23 +123,35 @@ def encrypt(fname: str) -> None:
 	:param fname: name of input file
 	:type fname: str
 	"""
-	part = 0
-
+	outfiles = []
 	with open(fname, "rb") as f:
-		outfiles = generate_random_files(num_files)
+		outfiles = [name + '.encpt' for name in generate_random_files(parser.num_files)]
 		files = [open(file, "wb") for file in outfiles]
 
 		byte = f.read(1)
+		random.seed(parser.seed)
+		part = random.randint(0, parser.num_files - 1)
 
 		while byte:
-			b = invert(byte)
+			b = xor(byte, [random.randint(0x00, 0xFF)])
 			files[part].write(b.to_bytes(1, 'big'))
-			part += 1
-			part %= num_files
+			part = random.randint(0, parser.num_files - 1)
 			byte = f.read(1)
 
 		for file in files:
 			file.close()
+
+	if parser.create_report:
+		with open(parser.report_name, "w+") as f:
+			f.writelines(f"Main File: {parser.files[0]}\n")
+			f.writelines(''.join('-' for _ in range(64)) + '\n')
+
+			for index in range(len(outfiles)):
+				f.writelines(f"{index}: Out File - {outfiles[index]}\n")
+
+			f.writelines(''.join('-' for _ in range(64)) + '\n')
+			f.writelines(f"Seed: {parser.seed}\n")
+			f.writelines(''.join('-' for _ in range(64)) + '\n')
 
 
 def decrypt(file_names: list):
@@ -82,60 +162,34 @@ def decrypt(file_names: list):
 	:param file_names: List of input files
 	:type file_names: list
 	"""
-	files = [[open(file, "rb"), False] for file in file_names]
-	outfile = generate_random_files(1)
-	outfile = open(outfile[0], "wb+")
+	file_struct = [{"file": open(file, "rb"), "done": False} for file in file_names]
 
-	index = 0
+	outfile_stream = open(parser.outfile, "wb+")
+
 	done = False
+
+	random.seed(parser.seed)
 
 	while not done:
 		done = True
-		for end_check in files:
-			done &= end_check[1]
+		for file in file_struct:
+			done &= file["done"]
 
-		for file in files:
-			if file[1]:
-				continue
-			byte = file[0].read(1)
-			if byte:
-				b = invert(byte)
-				outfile.write(b.to_bytes(1, 'big'))
-			else:
-				file[1] = True
+		f = random.randint(0, parser.num_files - 1)
 
-	for file in files:
-		file[0].close()
-	outfile.close()
+		if file_struct[f]["done"]:
+			continue
 
+		byte = file_struct[f]["file"].read(1)
+		if byte:
+			b = xor(byte, [random.randint(0x00, 0xFF)])
+			outfile_stream.write(b.to_bytes(1, 'big'))
+		else:
+			file_struct[f]["done"] = True
 
-def parse_args(arguments: list) -> None:
-	"""
-	This function will parse the commandline arguments to determine what this script will do
-
-	:param arguments: list of arguments to be parsed
-	:type arguments: list
-	"""
-	global num_files
-	global in_files
-	global mode
-
-	if(len(arguments) < 3):
-		sys.exit(2)
-
-	mode = arguments[1]
-
-	if mode == '-d':
-		num_files = int(arguments[2])
-		in_files = arguments[3:]
-		if len(in_files) != num_files:
-			sys.exit(3)
-
-		decrypt(in_files)
-
-	if mode == '-e':
-		num_files = int(arguments[2])
-		in_files = [arguments[3]]
+	for file in file_struct:
+		file["file"].close()
+	outfile_stream.close()
 
 
 def main(arguments: list):
@@ -145,12 +199,13 @@ def main(arguments: list):
 	:param arguments: list of commandline arguments
 	:type arguments: list
 	"""
-	global mode
+	if parser.mode == '-e':
+		encrypt(parser.files[0])
 
-	parse_args(arguments)
-	if mode == '-e':
-		encrypt(in_files[0])
+	if parser.mode == '-d':
+		decrypt(parser.files)
 
 
 if __name__ == '__main__':
-	main(sys.argv)
+	parser = ArgParser(sys.argv)
+	main(parser)
